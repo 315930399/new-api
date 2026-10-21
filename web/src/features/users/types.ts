@@ -126,7 +126,21 @@ export interface UserFormData {
   group?: string // Only used when updating user
   remark?: string // Only used when updating user
   admin_permissions?: AdminPermissionMatrix
+  upstream_key?: string
+  remove_upstream_key?: boolean
 }
+
+export interface UserUpstreamKeyStatus {
+  configured: boolean
+  key_preview: string
+  updated_time: number
+}
+
+export interface UserUpstreamKeyResponse extends ApiResponse<UserUpstreamKeyStatus> {}
+
+export interface UserUpstreamKeyRevealResponse extends ApiResponse<{
+  key: string
+}> {}
 
 export type ManageUserAction =
   | 'promote'

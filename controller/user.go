@@ -650,9 +650,19 @@ func GetUserModels(c *gin.Context) {
 }
 
 func UpdateUser(c *gin.Context) {
-	var updatedUser model.User
-	err := common.DecodeJson(c.Request.Body, &updatedUser)
+	request := userMutationRequest{}
+	err := common.DecodeJson(c.Request.Body, &request)
+	updatedUser := request.User
 	if err != nil || updatedUser.Id == 0 {
+		common.ApiErrorT(c, "Invalid parameters")
+		return
+	}
+	upstreamKey := strings.TrimSpace(request.UpstreamKey)
+	if request.RemoveUpstreamKey && upstreamKey != "" {
+		common.ApiErrorT(c, "Invalid parameters")
+		return
+	}
+	if len(upstreamKey) > model.MaxUserUpstreamKeyLength {
 		common.ApiErrorT(c, "Invalid parameters")
 		return
 	}
@@ -681,13 +691,15 @@ func UpdateUser(c *gin.Context) {
 		return
 	}
 	updatePassword := updatedUser.Password != ""
+	keyChange := upstreamKey != "" || request.RemoveUpstreamKey
 	auditParams := map[string]any{
 		"username": originUser.Username,
 		"id":       updatedUser.Id,
 	}
-	// Resetting a password or rewriting the admin permission matrix changes what
-	// the managed account can do or who can sign in to it.
-	if updatePassword || updatedUser.AdminPermissions != nil {
+	// Resetting a password, rewriting the admin permission matrix, or changing
+	// the upstream credential changes what the managed account can do or which
+	// upstream it can reach.
+	if updatePassword || updatedUser.AdminPermissions != nil || keyChange {
 		authorization := requireAdminUserProof(c, service.VerificationScopeAdminUserUpdate, service.AdminUserContext{UserID: updatedUser.Id})
 		if authorization == nil {
 			return
@@ -702,11 +714,28 @@ func UpdateUser(c *gin.Context) {
 			return err
 		}
 		touched, err := updateAdminPermissionsForUserInTx(c, tx, updatedUser.Id, originUser.Role, updatedUser.AdminPermissions)
+		if err != nil {
+			return err
+		}
 		authzTouched = touched
-		return err
+		switch {
+		case upstreamKey != "":
+			_, err = model.UpsertUserUpstreamKeyWithTx(tx, updatedUser.Id, upstreamKey)
+			return err
+		case request.RemoveUpstreamKey:
+			if err := model.DeleteUserUpstreamKeyWithTx(tx, updatedUser.Id); err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+		}
+		return nil
 	}); err != nil {
 		common.ApiError(c, err)
 		return
+	}
+	if keyChange {
+		model.PublishUserUpstreamKeyCache(updatedUser.Id)
+		auditParams["upstream_key_configured"] = upstreamKey != ""
+		auditParams["upstream_key_removed"] = request.RemoveUpstreamKey
 	}
 	if authzTouched {
 		if err := authz.ReloadPolicy(); err != nil {
@@ -996,11 +1025,25 @@ func DeleteSelf(c *gin.Context) {
 	})
 }
 
+// userMutationRequest carries the regular user fields plus the optional single
+// upstream key managed together with the account.
+type userMutationRequest struct {
+	model.User
+	UpstreamKey       string `json:"upstream_key"`
+	RemoveUpstreamKey bool   `json:"remove_upstream_key"`
+}
+
 func CreateUser(c *gin.Context) {
-	var user model.User
-	err := common.DecodeJson(c.Request.Body, &user)
+	request := userMutationRequest{}
+	err := common.DecodeJson(c.Request.Body, &request)
+	user := request.User
 	user.Username = strings.TrimSpace(user.Username)
 	if err != nil || user.Username == "" || user.Password == "" {
+		common.ApiErrorT(c, "Invalid parameters")
+		return
+	}
+	upstreamKey := strings.TrimSpace(request.UpstreamKey)
+	if request.RemoveUpstreamKey || len(upstreamKey) > model.MaxUserUpstreamKeyLength {
 		common.ApiErrorT(c, "Invalid parameters")
 		return
 	}
@@ -1021,8 +1064,9 @@ func CreateUser(c *gin.Context) {
 		return
 	}
 	auditParams := map[string]any{"role": user.Role}
-	// Creating an administrator grants privilege just like promoting one.
-	if user.Role >= common.RoleAdminUser {
+	// Creating an administrator grants privilege just like promoting one. A
+	// bundled upstream key is also a credential and requires the same proof.
+	if user.Role >= common.RoleAdminUser || upstreamKey != "" {
 		authorization := requireAdminUserProof(c, service.VerificationScopeAdminUserCreate, service.AdminUserCreateContext{Role: user.Role})
 		if authorization == nil {
 			return
@@ -1042,8 +1086,16 @@ func CreateUser(c *gin.Context) {
 			return err
 		}
 		touched, err := updateAdminPermissionsForUserInTx(c, tx, cleanUser.Id, cleanUser.Role, user.AdminPermissions)
+		if err != nil {
+			return err
+		}
+		if upstreamKey != "" {
+			if _, err := model.UpsertUserUpstreamKeyWithTx(tx, cleanUser.Id, upstreamKey); err != nil {
+				return err
+			}
+		}
 		authzTouched = touched
-		return err
+		return nil
 	}); err != nil {
 		common.ApiError(c, err)
 		return
@@ -1055,6 +1107,10 @@ func CreateUser(c *gin.Context) {
 		}
 	}
 	cleanUser.FinishInsert(0)
+	if upstreamKey != "" {
+		model.PublishUserUpstreamKeyCache(cleanUser.Id)
+		auditParams["upstream_key_configured"] = true
+	}
 
 	auditParams["username"] = cleanUser.Username
 	recordManageAuditFor(c, cleanUser.Id, "user.create", auditParams)

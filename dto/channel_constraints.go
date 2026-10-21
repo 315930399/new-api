@@ -39,6 +39,9 @@ const (
 	FilterRequestPath        ChannelFilterKind = "request_path"
 	FilterTaskPluginIdentity ChannelFilterKind = "task_plugin_identity"
 	FilterResponsesWebSocket ChannelFilterKind = "responses_websocket"
+	// FilterUserUpstreamKey hides channels that run in per-user key mode from a
+	// user who has not configured the single upstream key.
+	FilterUserUpstreamKey ChannelFilterKind = "user_upstream_key"
 )
 
 type ChannelFilter struct {
@@ -47,6 +50,8 @@ type ChannelFilter struct {
 	TaskPluginKey          string
 	TaskPluginKeys         []string
 	TaskPluginChannelTypes []int
+	// UserId scopes FilterUserUpstreamKey to the requesting user.
+	UserId int
 }
 
 type ChannelConstraints struct {

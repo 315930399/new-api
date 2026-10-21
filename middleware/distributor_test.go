@@ -16,8 +16,10 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestChannelMatchesExpectedTaskPluginUsesGenericChannelSetting(t *testing.T) {
@@ -361,4 +363,65 @@ func TestSharedEndpointRebindsToBoundNewAPIExtension(t *testing.T) {
 	require.Nil(t, SetupContextForSelectedChannel(c, channel, "task-model"))
 	assert.Equal(t, "alpha", c.GetString("task_plugin_key"), "the first bound candidate executes regardless of the earlier pin")
 	assert.Equal(t, "alpha", c.MustGet(jsplugin.ContextKeyPinnedEndpoint).(jsplugin.PinnedEndpoint).Plugin.Meta.Key)
+}
+
+func TestSetupContextUsesSingleUserUpstreamKey(t *testing.T) {
+	previousDB, previousCache := model.DB, common.MemoryCacheEnabled
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.UserUpstreamKey{}, &model.User{}))
+	model.DB = db
+	common.MemoryCacheEnabled = false
+	t.Cleanup(func() {
+		model.DB = previousDB
+		common.MemoryCacheEnabled = previousCache
+	})
+
+	require.NoError(t, db.Create(&model.User{
+		Id:          9,
+		Username:    "upstream-key-owner",
+		Password:    "unused-password-hash",
+		Status:      common.UserStatusEnabled,
+		AuthVersion: 1,
+		AffCode:     "upstream-key-owner",
+	}).Error)
+
+	first := &model.Channel{Id: 41, Type: constant.ChannelTypeOpenAI, Key: "sk-channel-first"}
+	first.SetSetting(dto.ChannelSettings{UserKeyMode: true})
+	second := &model.Channel{Id: 42, Type: constant.ChannelTypeOpenAI, Key: "sk-channel-second"}
+	second.SetSetting(dto.ChannelSettings{UserKeyMode: true})
+	plain := &model.Channel{Id: 43, Type: constant.ChannelTypeOpenAI, Key: "sk-channel-plain"}
+	require.NoError(t, db.Create(first).Error)
+	require.NoError(t, db.Create(second).Error)
+	require.NoError(t, db.Create(plain).Error)
+	_, err = model.UpsertUserUpstreamKey(9, "sk-user-9")
+	require.NoError(t, err)
+
+	owner, _ := gin.CreateTestContext(httptest.NewRecorder())
+	owner.Set("id", 9)
+	require.Nil(t, SetupContextForSelectedChannel(owner, first, "gpt-4o-mini"))
+	assert.Equal(t, "sk-user-9", common.GetContextKeyString(owner, constant.ContextKeyChannelKey))
+	assert.False(t, common.GetContextKeyBool(owner, constant.ContextKeyChannelIsMultiKey))
+
+	// The same single key is reused on every channel in the mode.
+	require.Nil(t, SetupContextForSelectedChannel(owner, second, "gpt-4o-mini"))
+	assert.Equal(t, "sk-user-9", common.GetContextKeyString(owner, constant.ContextKeyChannelKey))
+
+	// The channel credential is never used for a user without a configured key.
+	stranger, _ := gin.CreateTestContext(httptest.NewRecorder())
+	stranger.Set("id", 10)
+	setupErr := SetupContextForSelectedChannel(stranger, first, "gpt-4o-mini")
+	require.NotNil(t, setupErr)
+	assert.Contains(t, setupErr.Error(), "no upstream key")
+
+	// The administrator probe falls back to the channel credential, so a channel
+	// can still be tested before every user has a key.
+	probe, _ := gin.CreateTestContext(httptest.NewRecorder())
+	probe.Set("id", 10)
+	require.Nil(t, SetupContextForChannelTest(probe, first, "gpt-4o-mini"))
+	assert.Equal(t, "sk-channel-first", common.GetContextKeyString(probe, constant.ContextKeyChannelKey))
+
+	// Channels without per-user key mode keep using their own credential.
+	require.Nil(t, SetupContextForSelectedChannel(owner, plain, "gpt-4o-mini"))
+	assert.Equal(t, "sk-channel-plain", common.GetContextKeyString(owner, constant.ContextKeyChannelKey))
 }

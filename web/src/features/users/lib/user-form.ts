@@ -27,7 +27,7 @@ import { quotaUnitsToDollars } from '@/lib/format'
 import { ROLE } from '@/lib/roles'
 
 import { DEFAULT_GROUP } from '../constants'
-import { type UserFormData, type User } from '../types'
+import type { UserFormData, User } from '../types'
 
 // ============================================================================
 // Form Schema
@@ -41,6 +41,8 @@ export const userFormSchema = z.object({
   quota_dollars: z.number().min(0).optional(),
   group: z.string().optional(),
   remark: z.string().optional(),
+  upstream_key: z.string().optional(),
+  remove_upstream_key: z.boolean().optional(),
   admin_permissions: z
     .record(z.string(), z.record(z.string(), z.boolean()))
     .optional(),
@@ -60,6 +62,8 @@ export const USER_FORM_DEFAULT_VALUES: UserFormValues = {
   quota_dollars: 0,
   group: DEFAULT_GROUP,
   remark: '',
+  upstream_key: '',
+  remove_upstream_key: false,
   // Filled against the backend catalog at render time; see UsersMutateDrawer.
   admin_permissions: {},
 }
@@ -80,6 +84,13 @@ export function transformFormDataToPayload(
     username: data.username,
     display_name: data.display_name || data.username,
     password: data.password || undefined,
+  }
+  const upstreamKey = data.upstream_key?.trim()
+  if (upstreamKey) {
+    payload.upstream_key = upstreamKey
+  }
+  if (data.remove_upstream_key) {
+    payload.remove_upstream_key = true
   }
 
   const role = userId === undefined ? data.role || 1 : (data.role ?? 0)
@@ -121,6 +132,8 @@ export function transformUserToFormDefaults(user: User): UserFormValues {
     quota_dollars: quotaUnitsToDollars(user.quota),
     group: user.group || DEFAULT_GROUP,
     remark: user.remark || '',
+    upstream_key: '',
+    remove_upstream_key: false,
     admin_permissions: user.admin_permissions ?? {},
   }
 }

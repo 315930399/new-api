@@ -34,13 +34,25 @@ func InitChannelCache() {
 	newChannel2advancedCustomConfig := make(map[int]*kitdto.AdvancedCustomConfig)
 	var channels []*Channel
 	DB.Find(&channels)
+	userKeyModeInUse := false
 	for _, channel := range channels {
 		newChannelId2channel[channel.Id] = channel
+		if !userKeyModeInUse && channel.RequiresUserUpstreamKey() {
+			userKeyModeInUse = true
+		}
 		if channel.Type == constant.ChannelTypeAdvancedCustom {
 			if config := channel.GetOtherSettings().AdvancedCustom; config != nil {
 				newChannel2advancedCustomConfig[channel.Id] = config
 			}
 		}
+	}
+	// Load user upstream keys only when a channel actually uses per-user key
+	// mode; deployments that never enable it avoid a full user-key table scan on
+	// every channel cache sync.
+	if userKeyModeInUse {
+		InitUserUpstreamKeyCache()
+	} else {
+		clearUserUpstreamKeyCache()
 	}
 	var abilities []*Ability
 	DB.Find(&abilities)
@@ -129,15 +141,21 @@ func GetRandomSatisfiedChannel(
 	defer channelSyncLock.RUnlock()
 
 	// First, try to find channels with the exact model name.
-	channels, _ := filterCandidateIDs(group2model2channels[group][model], model, filters)
+	channels, emptiedBy := filterCandidateIDs(group2model2channels[group][model], model, filters)
 
 	// If no channels found, try to find channels with the normalized model name.
 	if len(channels) == 0 {
 		normalizedModel := ratio_setting.RoutingMatchModelName(model)
-		channels, _ = filterCandidateIDs(group2model2channels[group][normalizedModel], model, filters)
+		normalized, normalizedEmptiedBy := filterCandidateIDs(group2model2channels[group][normalizedModel], model, filters)
+		if len(normalized) > 0 {
+			channels, emptiedBy = normalized, normalizedEmptiedBy
+		}
 	}
 
 	if len(channels) == 0 {
+		if emptiedBy == dto.FilterUserUpstreamKey {
+			return nil, ErrUserUpstreamKeyRequired
+		}
 		return nil, nil
 	}
 

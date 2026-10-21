@@ -249,6 +249,13 @@ func InitTask(platform constant.TaskPlatform, relayInfo *commonRelay.RelayInfo) 
 			relayInfo.ChannelMeta.ChannelType == constant.ChannelTypeNewAPI {
 			privateData.Key = relayInfo.ChannelMeta.ApiKey
 		}
+		// A per-user key channel must poll with the user's credential rather than
+		// the channel credential, even if that key is changed later.
+		if privateData.Key == "" {
+			if channel, err := CacheGetChannel(relayInfo.ChannelId); err == nil && channel.RequiresUserUpstreamKey() {
+				privateData.Key = relayInfo.ChannelMeta.ApiKey
+			}
+		}
 		if relayInfo.UpstreamModelName != "" {
 			properties.UpstreamModelName = relayInfo.UpstreamModelName
 		}

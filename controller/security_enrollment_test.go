@@ -1,4 +1,4 @@
-package controller
+﻿package controller
 
 import (
 	"bytes"
@@ -76,7 +76,7 @@ func setupSecurityEnrollmentTest(t *testing.T) (*model.User, service.AuthIdentit
 	var version string
 	require.NoError(t, db.Raw(versionQuery).Scan(&version).Error)
 	t.Logf("database: %s %s", dialect, version)
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.TwoFA{}, &model.TwoFABackupCode{}, &model.PasskeyCredential{}, &model.AuthFlow{}, &model.UserOAuthBinding{}, &model.Option{}, &model.UserAccessToken{}))
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.TwoFA{}, &model.TwoFABackupCode{}, &model.PasskeyCredential{}, &model.AuthFlow{}, &model.UserOAuthBinding{}, &model.Option{}, &model.UserAccessToken{}, &model.UserUpstreamKey{}))
 	require.NoError(t, logDB.AutoMigrate(&model.AuditLog{}))
 	model.DB, model.LOG_DB = db, logDB
 	require.NoError(t, model.EnsureLegacyAccessTokenRetireAt(time.Now().Unix()))
@@ -102,6 +102,10 @@ func setupSecurityEnrollmentTest(t *testing.T) (*model.User, service.AuthIdentit
 		if err == nil {
 			_ = connection.Close()
 		}
+		logConnection, logErr := logDB.DB()
+		if logErr == nil {
+			_ = logConnection.Close()
+		}
 	})
 	password, err := common.Password2Hash("enrollment-password")
 	require.NoError(t, err)
@@ -116,18 +120,29 @@ func setupSecurityEnrollmentTest(t *testing.T) (*model.User, service.AuthIdentit
 }
 
 func securityEnrollmentRequest(method, path, body, proof string, identity service.AuthIdentity, handler gin.HandlerFunc) *httptest.ResponseRecorder {
+	return securityEnrollmentRequestAs(method, path, body, proof, identity, common.RoleCommonUser, handler)
+}
+
+func securityEnrollmentRequestAs(method, path, body, proof string, identity service.AuthIdentity, role int, handler gin.HandlerFunc) *httptest.ResponseRecorder {
 	response := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(response)
 	c.Request = httptest.NewRequest(method, path, strings.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
 	c.Request.Header.Set("X-Security-Proof", proof)
 	c.Set("id", identity.UserID)
-	c.Set("role", common.RoleCommonUser)
+	c.Set("role", role)
 	c.Set("session_id", identity.SessionID)
 	c.Set("auth_version", identity.UserAuthVersion)
 	c.Set("session_version", identity.SessionVersion)
 	handler(c)
 	return response
+}
+
+func withRouteUserID(handler gin.HandlerFunc, id int) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Params = gin.Params{{Key: "id", Value: strconv.Itoa(id)}}
+		handler(c)
+	}
 }
 
 func issueSecurityEnrollmentProof(t *testing.T, identity service.AuthIdentity, operation service.VerificationOperation, method string) string {
@@ -795,6 +810,9 @@ func TestSecurityEnrollmentOperationContext(t *testing.T) {
 		{"admin create administrator", "admin.user.create", `{"role":10}`, nil},
 		{"admin create common user", "admin.user.create", `{"role":1}`, service.ErrVerificationContextInvalid},
 		{"admin create unknown role", "admin.user.create", `{"role":50}`, service.ErrVerificationContextInvalid},
+		{"admin upstream key read", "admin.user.upstream_key.read", `{"user_id":7}`, nil},
+		{"admin upstream key without target", "admin.user.upstream_key.read", ``, service.ErrVerificationContextInvalid},
+		{"admin upstream key extra field", "admin.user.upstream_key.read", `{"user_id":7,"key":"x"}`, service.ErrVerificationContextInvalid},
 		{"unknown scope", "user.email.change", `{}`, service.ErrProofScope},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1881,3 +1899,121 @@ func TestSecurityEnrollmentRejectsChangedFirstFactorPolicy(t *testing.T) {
 		}
 	}
 }
+
+func TestUserCreateAndUpdateManageUpstreamKey(t *testing.T) {
+	_, _ = setupSecurityEnrollmentTest(t)
+
+	operator := &model.User{Username: "upstream-operator", Password: "password", Role: common.RoleRootUser, Status: common.UserStatusEnabled, Group: "default", AuthVersion: 1, AffCode: "upstream-operator-aff"}
+	require.NoError(t, model.DB.Create(operator).Error)
+	require.NoError(t, model.PublishUserAuthCache(operator.Id))
+	bundle, err := service.CreateLoginSession(operator.Id, "password", "127.0.0.1", "upstream-operator")
+	require.NoError(t, err)
+	identity, err := service.ParseAccessToken(bundle.AccessToken)
+	require.NoError(t, err)
+
+	createProof := issueSecurityEnrollmentProof(t, identity, service.VerificationOperation{
+		Scope:   service.VerificationScopeAdminUserCreate,
+		Context: []byte(`{"role":10}`),
+	}, "password")
+	response := securityEnrollmentRequestAs(
+		http.MethodPost,
+		"/api/user/",
+		`{"username":"upstream-managed","password":"password123","display_name":"Managed","role":10,"upstream_key":"sk-created-key"}`,
+		createProof,
+		identity,
+		common.RoleRootUser,
+		CreateUser,
+	)
+	body := decodeSecurityEnrollmentResponse(t, response)
+	require.True(t, body.Success, body.Message)
+	assert.NotContains(t, response.Body.String(), "sk-created-key")
+
+	var target model.User
+	require.NoError(t, model.DB.Where("username = ?", "upstream-managed").First(&target).Error)
+	targetRow, err := model.GetUserUpstreamKeyRow(target.Id)
+	require.NoError(t, err)
+	assert.Equal(t, "sk-created-key", targetRow.Key)
+
+	// A create carrying a key without step-up is rejected before any write.
+	response = securityEnrollmentRequestAs(
+		http.MethodPost,
+		"/api/user/",
+		`{"username":"upstream-no-proof","password":"password123","role":10,"upstream_key":"sk-no-proof"}`,
+		"",
+		identity,
+		common.RoleRootUser,
+		CreateUser,
+	)
+	assert.Equal(t, http.StatusForbidden, response.Code)
+	body = decodeSecurityEnrollmentResponse(t, response)
+	assert.False(t, body.Success)
+	assert.Equal(t, "SECURITY_PROOF_REQUIRED", body.Code)
+	var noProofCount int64
+	require.NoError(t, model.DB.Model(&model.User{}).Where("username = ?", "upstream-no-proof").Count(&noProofCount).Error)
+	assert.Zero(t, noProofCount)
+
+	updateProof := issueSecurityEnrollmentProof(t, identity, service.VerificationOperation{
+		Scope:   service.VerificationScopeAdminUserUpdate,
+		Context: []byte(fmt.Sprintf(`{"user_id":%d}`, target.Id)),
+	}, "password")
+	updateBody := fmt.Sprintf(`{"id":%d,"username":"upstream-managed","display_name":"Managed","role":10,"group":"default","upstream_key":"sk-updated-key"}`, target.Id)
+	response = securityEnrollmentRequestAs(http.MethodPut, "/api/user/", updateBody, updateProof, identity, common.RoleRootUser, UpdateUser)
+	body = decodeSecurityEnrollmentResponse(t, response)
+	require.True(t, body.Success, body.Message)
+	assert.NotContains(t, response.Body.String(), "sk-updated-key")
+	targetRow, err = model.GetUserUpstreamKeyRow(target.Id)
+	require.NoError(t, err)
+	assert.Equal(t, "sk-updated-key", targetRow.Key)
+
+	// The status endpoint only exposes the masked preview.
+	response = securityEnrollmentRequestAs(
+		http.MethodGet,
+		fmt.Sprintf("/api/user/%d/upstream_key", target.Id),
+		"",
+		"",
+		identity,
+		common.RoleRootUser,
+		withRouteUserID(AdminGetUserUpstreamKey, target.Id),
+	)
+	body = decodeSecurityEnrollmentResponse(t, response)
+	require.True(t, body.Success, body.Message)
+	assert.NotContains(t, response.Body.String(), "sk-updated-key")
+	assert.Contains(t, response.Body.String(), "sk-u...-key")
+	var status userUpstreamKeyStatus
+	require.NoError(t, common.Unmarshal(body.Data, &status))
+	assert.True(t, status.Configured)
+
+	readProof := issueSecurityEnrollmentProof(t, identity, service.VerificationOperation{
+		Scope:   service.VerificationScopeAdminUserUpstreamKeyRead,
+		Context: []byte(fmt.Sprintf(`{"user_id":%d}`, target.Id)),
+	}, "password")
+	response = securityEnrollmentRequestAs(
+		http.MethodPost,
+		fmt.Sprintf("/api/user/%d/upstream_key/key", target.Id),
+		"",
+		readProof,
+		identity,
+		common.RoleRootUser,
+		withRouteUserID(AdminRevealUserUpstreamKey, target.Id),
+	)
+	body = decodeSecurityEnrollmentResponse(t, response)
+	require.True(t, body.Success, body.Message)
+	var revealed struct {
+		Key string `json:"key"`
+	}
+	require.NoError(t, common.Unmarshal(body.Data, &revealed))
+	assert.Equal(t, "sk-updated-key", revealed.Key)
+
+	removeProof := issueSecurityEnrollmentProof(t, identity, service.VerificationOperation{
+		Scope:   service.VerificationScopeAdminUserUpdate,
+		Context: []byte(fmt.Sprintf(`{"user_id":%d}`, target.Id)),
+	}, "password")
+	removeBody := fmt.Sprintf(`{"id":%d,"username":"upstream-managed","display_name":"Managed","role":10,"group":"default","remove_upstream_key":true}`, target.Id)
+	response = securityEnrollmentRequestAs(http.MethodPut, "/api/user/", removeBody, removeProof, identity, common.RoleRootUser, UpdateUser)
+	body = decodeSecurityEnrollmentResponse(t, response)
+	require.True(t, body.Success, body.Message)
+	_, err = model.GetUserUpstreamKeyRow(target.Id)
+	require.ErrorIs(t, err, gorm.ErrRecordNotFound)
+}
+
+

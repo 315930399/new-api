@@ -1032,6 +1032,7 @@ func (user *User) HardDelete() (int64, error) {
 	if err := invalidateUserCache(user.Id); err != nil {
 		common.SysError(common.LogText("failed to invalidate user cache after hard deleting user %d: %v", user.Id, err))
 	}
+	cacheUserUpstreamKey(user.Id, "")
 	return revokedAccessTokens, nil
 }
 
@@ -1046,6 +1047,7 @@ func deleteUserAuthenticationData(tx *gorm.DB, userId int) error {
 		&AuthFlow{},
 		&PasskeyCredential{},
 		&Token{},
+		&UserUpstreamKey{},
 	} {
 		if err := tx.Unscoped().Where("user_id = ?", userId).Delete(authenticationData).Error; err != nil {
 			return err

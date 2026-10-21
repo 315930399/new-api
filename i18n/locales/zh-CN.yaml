@@ -27,6 +27,8 @@ distributor.get_channel_failed: "获取分组 {{.Group}} 下模型 {{.Model}} �
 distributor.no_available_channel: "分组 {{.Group}} 下模型 {{.Model}} 无可用渠道（distributor）"
 distributor.no_available_channel_task_plugin: "分组 {{.Group}} 下模型 {{.Model}} 无可用渠道：该模型由任务插件认领，但当前没有启用的渠道可服务此模型（distributor）"
 distributor.invalid_request_parse_model: "无法解析模型"
+distributor.user_upstream_key_missing: "分组 {{.Group}} 下模型 {{.Model}} 无可用渠道：相关渠道已启用用户专属 Key，当前账号尚未配置。请在个人资料页配置上游 Key（distributor）"
+distributor.invalid_midjourney_request: "无效的midjourney请求，{{.Error}}"
 quota.user_insufficient: "用户额度不足, 剩余额度: {{.Remaining}}"
 quota.pre_consume_insufficient: "预扣费额度失败, 用户剩余额度: {{.Remaining}}, 需要预扣费额度: {{.Required}}"
 quota.subscription_insufficient: "订阅额度不足或未配置订阅: {{.Error}}"

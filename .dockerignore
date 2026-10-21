@@ -7,6 +7,13 @@ Makefile
 docs
 .eslintcache
 .gocache
+.gotmp
+.bun-cache
+.buntmp
+.bun-*.log
+.go-test*.log
+/data
+/logs
 /web/node_modules
 /web/dist
 !THIRD-PARTY-LICENSES.md

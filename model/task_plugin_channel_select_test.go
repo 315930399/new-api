@@ -72,7 +72,9 @@ func TestSharedPluginKeysFilterBothChannelSources(t *testing.T) {
 		matches, _ := ChannelSatisfiesFilters(&channel, "shared", filters)
 		assert.Equal(t, index < 2, matches)
 	}
-	assert.Equal(t, abilities[:2], filterAbilitiesByConstraints(abilities, "shared", filters))
+	filtered, emptiedByUserKey := filterAbilitiesByConstraints(abilities, "shared", filters)
+	assert.Equal(t, abilities[:2], filtered)
+	assert.False(t, emptiedByUserKey)
 	InitChannelCache()
 	channelSyncLock.RLock()
 	kept, emptied := filterCandidateIDs([]int{910001, 910002, 910003}, "shared", filters)
