@@ -271,6 +271,7 @@ export const channelFormSchema = z
     http2_connection_shards: z.number().int().optional(),
     pass_through_body_enabled: z.boolean().optional(),
     responses_websocket_enabled: z.boolean().optional(),
+    user_key_mode: z.boolean().optional(),
     system_prompt: z.string().optional(),
     system_prompt_override: z.boolean().optional(),
     // Type-specific settings (stored in settings JSON)
@@ -418,6 +419,23 @@ export const channelFormSchema = z
         ERROR_MESSAGES.INVALID_HTTP1_WITH_SHARDS
       )
     }
+    if (data.user_key_mode === true && data.multi_key_mode === 'multi_to_single') {
+      addRequiredIssue(
+        ctx,
+        'user_key_mode',
+        'Per-user key mode does not support multi-key channels'
+      )
+    }
+    if (
+      data.user_key_mode === true &&
+      data.type === CHANNEL_TYPE_TASK_PLUGIN
+    ) {
+      addRequiredIssue(
+        ctx,
+        'user_key_mode',
+        'Per-user key mode is not supported on task plugin channels'
+      )
+    }
   })
 
 export type ChannelFormValues = z.infer<typeof channelFormSchema>
@@ -462,6 +480,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   http2_connection_shards: 1,
   pass_through_body_enabled: false,
   responses_websocket_enabled: false,
+  user_key_mode: false,
   system_prompt: '',
   system_prompt_override: false,
   // Type-specific settings
@@ -506,6 +525,7 @@ export function transformChannelToFormDefaults(
     http2_connection_shards: 1,
     pass_through_body_enabled: false,
     responses_websocket_enabled: false,
+    user_key_mode: false,
     system_prompt: '',
     system_prompt_override: false,
   }
@@ -528,6 +548,7 @@ export function transformChannelToFormDefaults(
         pass_through_body_enabled: parsed.pass_through_body_enabled || false,
         responses_websocket_enabled:
           parsed.responses_websocket_enabled === true,
+        user_key_mode: parsed.user_key_mode === true,
         system_prompt: parsed.system_prompt || '',
         system_prompt_override: parsed.system_prompt_override || false,
       }
@@ -662,6 +683,7 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
     responses_websocket_enabled:
       supportsResponsesWebSocket(formData.type) &&
       formData.responses_websocket_enabled === true,
+    user_key_mode: formData.user_key_mode === true,
     system_prompt: formData.system_prompt || '',
     system_prompt_override: formData.system_prompt_override || false,
   }

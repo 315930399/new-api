@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
@@ -98,7 +99,7 @@ func ResolveOriginTask(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskErr
 	info.LockedChannel = ch
 
 	if originTask.ChannelId != info.ChannelId {
-		key, _, newAPIError := ch.GetNextEnabledKey()
+		key, _, newAPIError := middleware.ResolveChannelKey(c, ch)
 		if newAPIError != nil {
 			return service.TaskErrorWrapper(newAPIError, "channel_no_available_key", newAPIError.StatusCode)
 		}
@@ -543,7 +544,11 @@ func tryRealtimeFetch(task *model.Task, isOpenAIVideoAPI bool) []byte {
 		return nil
 	}
 
-	resp, err := adaptor.FetchTask(baseURL, channelModel.Key, task, proxy)
+	key, ok := model.ResolveTaskChannelKey(channelModel, task)
+	if !ok {
+		return nil
+	}
+	resp, err := adaptor.FetchTask(baseURL, key, task, proxy)
 	if err != nil || resp == nil {
 		return nil
 	}

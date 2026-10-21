@@ -116,7 +116,10 @@ func GetChannel(
 	if err != nil {
 		return nil, err
 	}
-	abilities = filterAbilitiesByConstraints(abilities, model, filters)
+	abilities, emptiedByUserKey := filterAbilitiesByConstraints(abilities, model, filters)
+	if len(abilities) == 0 && emptiedByUserKey {
+		return nil, ErrUserUpstreamKeyRequired
+	}
 	if len(abilities) > 0 {
 		priorities := make([]int64, 0)
 		seen := make(map[int64]bool)
@@ -166,9 +169,11 @@ func GetChannel(
 // filterAbilitiesByConstraints applies the same ChannelSatisfiesFilters
 // predicate used by the memory-cache path. A failed channel lookup fails
 // closed when a task-plugin identity is required and fails open otherwise.
-func filterAbilitiesByConstraints(abilities []Ability, modelName string, filters []dto.ChannelFilter) []Ability {
+// emptiedByUserKey reports that every candidate was rejected only because the
+// user has no upstream key, so the caller can explain the empty result.
+func filterAbilitiesByConstraints(abilities []Ability, modelName string, filters []dto.ChannelFilter) ([]Ability, bool) {
 	if len(abilities) == 0 {
-		return nil
+		return nil, false
 	}
 
 	channelIds := make([]int, 0, len(abilities))
@@ -184,9 +189,9 @@ func filterAbilitiesByConstraints(abilities []Ability, modelName string, filters
 	var channels []*Channel
 	if err := DB.Where("id IN ?", channelIds).Find(&channels).Error; err != nil {
 		if identityFilterRequiresKey(filters) {
-			return nil
+			return nil, false
 		}
-		return abilities
+		return abilities, false
 	}
 
 	channelsByID := make(map[int]*Channel, len(channels))
@@ -194,14 +199,22 @@ func filterAbilitiesByConstraints(abilities []Ability, modelName string, filters
 		channelsByID[channel.Id] = channel
 	}
 
+	userHasKey := false
+	if filter, ok := userUpstreamKeyFilter(filters); ok {
+		userHasKey = UserHasUpstreamKey(filter.UserId)
+	}
+
 	filtered := make([]Ability, 0, len(abilities))
+	rejectedByUserKey := 0
 	for _, ability := range abilities {
 		channel := channelsByID[ability.ChannelId]
-		if ok, _ := ChannelSatisfiesFilters(channel, modelName, filters); ok {
+		if ok, kind := channelSatisfiesFilters(channel, modelName, filters, userHasKey); ok {
 			filtered = append(filtered, ability)
+		} else if kind == dto.FilterUserUpstreamKey {
+			rejectedByUserKey++
 		}
 	}
-	return filtered
+	return filtered, rejectedByUserKey == len(abilities)
 }
 
 func identityFilterRequiresKey(filters []dto.ChannelFilter) bool {

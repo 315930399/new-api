@@ -67,10 +67,17 @@ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *t
 	}
 	logger.LogError(c, fmt.Sprintf("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, common.LocalLogPreview(err.MaskSensitiveErrorWithStatusCode())))
 	if ShouldDisableChannel(err) && channelError.AutoBan {
-		reason := err.MaskSensitiveErrorWithStatusCode()
-		gopool.Go(func() {
-			DisableChannel(channelError, reason)
-		})
+		channel, cacheErr := model.CacheGetChannel(channelError.ChannelId)
+		if cacheErr == nil && channel != nil && channel.RequiresUserUpstreamKey() {
+			// One user's upstream credential must not disable the channel for
+			// every other user. The administrator fixes or removes that key.
+			logger.LogWarn(c, fmt.Sprintf("skip auto-disable for per-user key channel #%d", channelError.ChannelId))
+		} else {
+			reason := err.MaskSensitiveErrorWithStatusCode()
+			gopool.Go(func() {
+				DisableChannel(channelError, reason)
+			})
+		}
 	}
 
 	if constant.ErrorLogEnabled && types.IsRecordErrorLog(err) {

@@ -538,7 +538,11 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 		return types.NewErrorWithStatusCode(errors.New("Responses WebSocket is disabled for this channel"), types.ErrorCode(appdto.FilterResponsesWebSocket), http.StatusForbidden, types.ErrOptionWithSkipRetry())
 	}
 	keyEnabled := channel.Key == s.lockedKey
-	if channel.ChannelInfo.IsMultiKey {
+	switch {
+	case channel.RequiresUserUpstreamKey():
+		key, hasKey := appmodel.GetUserUpstreamKey(c.GetInt("id"))
+		keyEnabled = hasKey && key == s.lockedKey
+	case channel.ChannelInfo.IsMultiKey:
 		keys := channel.GetKeys()
 		status := channel.ChannelInfo.MultiKeyStatusList[s.lockedKeyIndex]
 		keyEnabled = s.lockedKeyIndex >= 0 && s.lockedKeyIndex < len(keys) && keys[s.lockedKeyIndex] == s.lockedKey && (status == 0 || status == common.ChannelStatusEnabled)
@@ -920,6 +924,7 @@ func selectResponsesWSChannel(c *gin.Context, modelName string, retryParam *serv
 	}) {
 		constraints.AddFilter(appdto.ChannelFilter{Kind: appdto.FilterResponsesWebSocket})
 	}
+	service.AppendUserUpstreamKeyFilter(c)
 	channel, _, selectErr := service.SelectChannelForRequest(c, modelName, retryParam)
 	if selectErr != nil {
 		message := selectErr.Message

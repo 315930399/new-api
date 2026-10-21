@@ -21,6 +21,7 @@ import type { AxiosRequestConfig } from 'axios'
 import type { PermissionCatalog } from '@/lib/admin-permissions'
 import { api } from '@/lib/api'
 import type { CustomOAuthBinding } from '@/lib/oauth'
+import { authRequestOptions } from '@/lib/secure-verification'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
 import type {
@@ -29,6 +30,8 @@ import type {
   GetUsersResponse,
   SearchUsersParams,
   UserFormData,
+  UserUpstreamKeyResponse,
+  UserUpstreamKeyRevealResponse,
   ManageUserAction,
   ManageUserQuotaPayload,
   ApiResponse,
@@ -100,6 +103,32 @@ export async function searchUsers(
  */
 export async function getUser(id: number): Promise<ApiResponse<User>> {
   const res = await api.get(`/api/user/${id}`)
+  return res.data
+}
+
+/** Read the masked status of one user's single upstream key. */
+export async function getUserUpstreamKey(
+  userId: number
+): Promise<UserUpstreamKeyResponse> {
+  const res = await api.get(`/api/user/${userId}/upstream_key`)
+  return res.data
+}
+
+/** Reveal one user's full upstream key after administrator step-up. */
+export async function revealUserUpstreamKey(
+  userId: number,
+  proofToken: string,
+  signal?: AbortSignal
+): Promise<UserUpstreamKeyRevealResponse> {
+  const res = await api.post(
+    `/api/user/${userId}/upstream_key/key`,
+    undefined,
+    {
+      ...authRequestOptions,
+      ...securityProofConfig(proofToken),
+      signal,
+    }
+  )
   return res.data
 }
 

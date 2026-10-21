@@ -45,6 +45,7 @@ func Distribute() func(c *gin.Context) {
 			RequestPath: c.Request.URL.Path,
 		})
 		service.AppendTaskPluginIdentityFilter(c, c.GetString("expected_task_plugin_key"))
+		service.AppendUserUpstreamKeyFilter(c)
 		modelRequest, shouldSelectChannel, err := getModelRequest(c)
 		if err != nil {
 			abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
@@ -546,6 +547,41 @@ func getTaskOriginModelName(c *gin.Context) string {
 }
 
 func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, modelName string) *types.NewAPIError {
+	return setupContextForSelectedChannel(c, channel, modelName, false)
+}
+
+// SetupContextForChannelTest prepares a channel for an administrator probe. A
+// per-user key channel falls back to its own credential when the testing account
+// has none, because the probe validates upstream connectivity rather than one
+// user's entitlement.
+func SetupContextForChannelTest(c *gin.Context, channel *model.Channel, modelName string) *types.NewAPIError {
+	return setupContextForSelectedChannel(c, channel, modelName, true)
+}
+
+// ResolveChannelKey returns the upstream credential for one channel attempt. A
+// channel in per-user key mode never uses its own credential: the attempt only
+// proceeds with the single upstream key the requesting user has configured.
+func ResolveChannelKey(c *gin.Context, channel *model.Channel) (string, int, *types.NewAPIError) {
+	return resolveChannelKey(c, channel, false)
+}
+
+func resolveChannelKey(c *gin.Context, channel *model.Channel, allowChannelKeyFallback bool) (string, int, *types.NewAPIError) {
+	if channel.RequiresUserUpstreamKey() {
+		if key, ok := model.GetUserUpstreamKey(c.GetInt("id")); ok {
+			return key, 0, nil
+		}
+		if !allowChannelKeyFallback {
+			return "", 0, types.NewError(
+				errors.New("no upstream key is configured for this account"),
+				types.ErrorCodeChannelNoAvailableKey,
+				types.ErrOptionWithSkipRetry(),
+			)
+		}
+	}
+	return channel.GetNextEnabledKey()
+}
+
+func setupContextForSelectedChannel(c *gin.Context, channel *model.Channel, modelName string, allowChannelKeyFallback bool) *types.NewAPIError {
 	c.Set("original_model", modelName) // for retry
 	expectedPlugin := c.GetString("expected_task_plugin_key")
 	if channel == nil {
@@ -616,11 +652,11 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	common.SetContextKey(c, constant.ContextKeyChannelModelMapping, channel.GetModelMapping())
 	common.SetContextKey(c, constant.ContextKeyChannelStatusCodeMapping, channel.GetStatusCodeMapping())
 
-	key, index, newAPIError := channel.GetNextEnabledKey()
+	key, index, newAPIError := resolveChannelKey(c, channel, allowChannelKeyFallback)
 	if newAPIError != nil {
 		return newAPIError
 	}
-	if channel.ChannelInfo.IsMultiKey {
+	if channel.ChannelInfo.IsMultiKey && !channel.RequiresUserUpstreamKey() {
 		common.SetContextKey(c, constant.ContextKeyChannelIsMultiKey, true)
 		common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, index)
 	} else {

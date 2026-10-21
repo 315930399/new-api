@@ -18,8 +18,13 @@ type ChannelSettings struct {
 	Proxy                     string `json:"proxy"`
 	PassThroughBodyEnabled    bool   `json:"pass_through_body_enabled,omitempty"`
 	ResponsesWebSocketEnabled bool   `json:"responses_websocket_enabled,omitempty"`
-	SystemPrompt              string `json:"system_prompt,omitempty"`
-	SystemPromptOverride      bool   `json:"system_prompt_override,omitempty"`
+	// UserKeyMode switches the channel to per-user upstream credentials: every
+	// request is sent with the single upstream key its user has configured, and
+	// the channel's own key (or multi-key pool) is never used for relay. Enabling
+	// it makes the channel unavailable to users without a configured key.
+	UserKeyMode          bool   `json:"user_key_mode,omitempty"`
+	SystemPrompt         string `json:"system_prompt,omitempty"`
+	SystemPromptOverride bool   `json:"system_prompt_override,omitempty"`
 	// TaskExtendPluginKeys lists the task plugins a New API channel (type 60)
 	// is extended with. The upstream gateway may host many plugins, so the
 	// channel serves every listed plugin's models while the request still pins

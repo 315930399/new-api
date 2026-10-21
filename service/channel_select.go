@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -39,6 +40,27 @@ func AppendTaskPluginIdentityFilter(c *gin.Context, pluginKey string) {
 		TaskPluginChannelTypes: channelTypes,
 		TaskPluginKeys:         pluginKeys,
 	})
+}
+
+// AppendUserUpstreamKeyFilter hides channels that run in per-user key mode from
+// a user who has not configured the single upstream key. It is idempotent so the
+// HTTP distributor and the Responses WebSocket relay can both call it on one
+// request.
+func AppendUserUpstreamKeyFilter(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	userId := c.GetInt("id")
+	if userId <= 0 {
+		return
+	}
+	constraints := GetChannelConstraints(c)
+	if slices.ContainsFunc(constraints.Filters, func(filter dto.ChannelFilter) bool {
+		return filter.Kind == dto.FilterUserUpstreamKey
+	}) {
+		return
+	}
+	constraints.AddFilter(dto.ChannelFilter{Kind: dto.FilterUserUpstreamKey, UserId: userId})
 }
 
 type RetryParam struct {
@@ -202,7 +224,6 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 	}
 	return channel, selectGroup, nil
 }
-
 func pinnedTaskPluginIdentities(c *gin.Context, expected string) ([]int, []string) {
 	if c == nil || expected == "" {
 		return nil, nil
@@ -353,6 +374,13 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 			showGroup := usingGroup
 			if usingGroup == "auto" {
 				showGroup = fmt.Sprintf("auto(%s)", selectGroup)
+			}
+			if errors.Is(err, model.ErrUserUpstreamKeyRequired) {
+				return nil, selectGroup, &ChannelSelectError{
+					StatusCode: http.StatusServiceUnavailable, Code: types.ErrorCodeModelNotFound,
+					MessageID: i18n.MsgDistributorUserUpstreamKeyMissing,
+					Params:    map[string]any{"Group": showGroup, "Model": modelName},
+				}
 			}
 			return nil, selectGroup, &ChannelSelectError{
 				StatusCode: http.StatusServiceUnavailable, Code: types.ErrorCodeModelNotFound, MessageID: i18n.MsgDistributorGetChannelFailed,

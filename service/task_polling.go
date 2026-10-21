@@ -268,19 +268,62 @@ func updateBatchTasks(ctx context.Context, adaptor BatchTaskPollingAdaptor, chan
 	if baseURL == "" {
 		baseURL = constant.GetChannelBaseURL(ch.Type)
 	}
-	tasks := make([]*model.Task, 0, len(taskIds))
+
+	// One batch request carries one credential. A per-user key channel groups its
+	// pending tasks by the key that submitted each of them.
+	keyOrder := make([]string, 0, 1)
+	tasksByKey := make(map[string][]*model.Task)
+	var keylessTasks []*model.Task
 	for _, upstreamID := range taskIds {
-		if task := taskM[upstreamID]; task != nil {
-			tasks = append(tasks, task)
+		task := taskM[upstreamID]
+		if task == nil {
+			continue
 		}
+		key, ok := taskPollingKey(ch, task)
+		if !ok {
+			keylessTasks = append(keylessTasks, task)
+			continue
+		}
+		if _, seen := tasksByKey[key]; !seen {
+			keyOrder = append(keyOrder, key)
+		}
+		tasksByKey[key] = append(tasksByKey[key], task)
+	}
+	var firstErr error
+	if len(keylessTasks) > 0 {
+		if err := failTasksFromPoll(ctx, adaptor, keylessTasks, "no per-user key is configured for the task owner"); err != nil {
+			firstErr = err
+		}
+	}
+	for _, key := range keyOrder {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := pollBatchTasksWithKey(ctx, adaptor, ch, baseURL, proxy, key, tasksByKey[key], taskM); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// taskPollingKey returns the upstream credential a task must be polled with and
+// whether one is available. Per-user key channels never fall back to the shared
+// channel credential.
+func taskPollingKey(ch *model.Channel, task *model.Task) (string, bool) {
+	return model.ResolveTaskChannelKey(ch, task)
+}
+
+func pollBatchTasksWithKey(ctx context.Context, adaptor BatchTaskPollingAdaptor, ch *model.Channel, baseURL string, proxy string, key string, tasks []*model.Task, taskM map[string]*model.Task) error {
+	if len(tasks) == 0 {
+		return nil
 	}
 	// The channel type tells plugin adaptors whether the upstream is another
 	// New API gateway, the same signal submission derives from the request.
 	info := &relaycommon.RelayInfo{}
 	info.ChannelMeta = &relaycommon.ChannelMeta{ChannelType: ch.Type, ChannelId: ch.Id, ChannelBaseUrl: baseURL}
-	info.ApiKey = ch.Key
+	info.ApiKey = key
 	adaptor.Init(info)
-	resp, err := adaptor.FetchBatchTasks(baseURL, ch.Key, tasks, proxy)
+	resp, err := adaptor.FetchBatchTasks(baseURL, key, tasks, proxy)
 	if err != nil {
 		common.SysLog(fmt.Sprintf("Get Task Do req error: %v", err))
 		return recordPollFailureForTasks(ctx, adaptor, tasks, pollClassTransport, 0, err.Error())
@@ -295,7 +338,7 @@ func updateBatchTasks(ctx context.Context, adaptor BatchTaskPollingAdaptor, chan
 	case pollClassNotFound:
 		return failTasksFromPoll(ctx, adaptor, tasks, fmt.Sprintf("upstream task not found (HTTP %d)", resp.StatusCode))
 	case pollClassAuth:
-		logger.LogWarn(ctx, fmt.Sprintf("task poll auth failure channel_id=%d http=%d", channelId, resp.StatusCode))
+		logger.LogWarn(ctx, fmt.Sprintf("task poll auth failure channel_id=%d http=%d", ch.Id, resp.StatusCode))
 		return recordPollFailureForTasks(ctx, adaptor, tasks, pollClassAuth, resp.StatusCode, "")
 	case pollClassTransient:
 		return recordPollFailureForTasks(ctx, adaptor, tasks, pollClassTransient, resp.StatusCode, "")
@@ -455,7 +498,7 @@ func updateVideoTasks(ctx context.Context, platform constant.TaskPlatform, chann
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err := updateVideoSingleTask(ctx, adaptor, cacheGetChannel, taskId, taskM); err != nil {
+		if err := updateVideoSingleTask(ctx, adaptor, cacheGetChannel, info, taskId, taskM); err != nil {
 			logger.LogError(ctx, fmt.Sprintf("Failed to update video task %s: %s", taskId, err.Error()))
 		}
 		if disablePollingSleep || i == len(taskIds)-1 {
@@ -472,7 +515,7 @@ func updateVideoTasks(ctx context.Context, platform constant.TaskPlatform, chann
 	return nil
 }
 
-func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *model.Channel, taskId string, taskM map[string]*model.Task) error {
+func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *model.Channel, info *relaycommon.RelayInfo, taskId string, taskM map[string]*model.Task) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -487,13 +530,15 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 		logger.LogError(ctx, fmt.Sprintf("Task %s not found in taskM", taskId))
 		return fmt.Errorf("task %s not found", taskId)
 	}
-	key := ch.Key
-
-	privateData := task.PrivateData
-	if privateData.Key != "" {
-		key = privateData.Key
-	}
 	snap := task.Snapshot()
+	key, ok := taskPollingKey(ch, task)
+	if !ok {
+		return failTaskFromPoll(ctx, adaptor, task, snap.Status, "no per-user key is configured for the task owner")
+	}
+	if info != nil && info.ApiKey != key {
+		info.ApiKey = key
+		adaptor.Init(info)
+	}
 	resp, err := adaptor.FetchTask(baseURL, key, task, proxy)
 	if err != nil {
 		return recordPollFailure(ctx, adaptor, task, snap.Status, pollClassTransport, 0, err.Error())

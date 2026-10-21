@@ -18,12 +18,13 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useQuery } from '@tanstack/react-query'
-import { Pencil } from 'lucide-react'
+import { Eye, EyeOff, Pencil } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import { CopyButton } from '@/components/copy-button'
 import {
   SideDrawerSection,
   sideDrawerContentClassName,
@@ -62,6 +63,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
+import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import {
   ADMIN_PERMISSION_ACTIONS,
@@ -72,20 +74,30 @@ import {
   type AdminPermissionMatrix,
 } from '@/lib/admin-permissions'
 import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
-import { formatQuota, parseQuotaFromDollars } from '@/lib/format'
+import {
+  formatQuota,
+  formatTimestampToDate,
+  parseQuotaFromDollars,
+} from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
 import { accountPasswordSchema } from '@/lib/password-policy'
 import { ROLE } from '@/lib/roles'
 import { AuthOperationError } from '@/lib/secure-verification'
-import { requireServerSuccess } from '@/lib/server-error-message'
+import {
+  createServerError,
+  getServerErrorMessage,
+  requireServerSuccess,
+} from '@/lib/server-error-message'
 import { useAuthStore } from '@/stores/auth-store'
 
 import {
   createUser,
-  updateUser,
   getUser,
+  getUserUpstreamKey,
   getGroups,
   getPermissionCatalog,
+  revealUserUpstreamKey,
+  updateUser,
 } from '../api'
 import { BINDING_FIELDS, ERROR_MESSAGES, SUCCESS_MESSAGES } from '../constants'
 import {
@@ -140,6 +152,24 @@ export function UsersMutateDrawer({
     resolver: zodResolver(userFormSchema),
     defaultValues: USER_FORM_DEFAULT_VALUES,
   })
+
+  const [revealedKey, setRevealedKey] = useState<string | null>(null)
+  const [isRevealingKey, setIsRevealingKey] = useState(false)
+  const targetUserId = currentRow?.id ?? 0
+
+  const upstreamKeyQuery = useQuery({
+    queryKey: ['user-upstream-key', targetUserId],
+    queryFn: async () =>
+      requireServerSuccess(await getUserUpstreamKey(targetUserId)),
+    enabled: open && isUpdate && targetUserId > 0,
+    meta: { errorToast: false },
+  })
+
+  useEffect(() => {
+    if (!open) {
+      setRevealedKey(null)
+    }
+  }, [open, currentRow?.id])
 
   // Load existing data when updating
   useEffect(() => {
@@ -201,11 +231,15 @@ export function UsersMutateDrawer({
       ) {
         delete payload.admin_permissions
       }
-      // Resetting a password, rewriting admin permissions, or creating an
-      // administrator changes who can sign in or what they may do.
+      // Resetting a password, rewriting admin permissions, changing the
+      // upstream key, or creating an administrator changes who can sign in,
+      // what they may do, or which upstream credential they use.
+      const keyChanged = Boolean(
+        payload.upstream_key || payload.remove_upstream_key
+      )
       let proofToken: string | undefined
       if (isUpdate && currentRow) {
-        if (payload.password || payload.admin_permissions) {
+        if (payload.password || payload.admin_permissions || keyChanged) {
           const proof = await requestVerification({
             scope: 'admin.user.update',
             context: { user_id: currentRow.id },
@@ -218,14 +252,20 @@ export function UsersMutateDrawer({
           if (!proof) return
           proofToken = proof.proof_token
         }
-      } else if ((payload.role ?? 0) >= ROLE.ADMIN) {
+      } else if ((payload.role ?? 0) >= ROLE.ADMIN || keyChanged) {
         const proof = await requestVerification({
           scope: 'admin.user.create',
           context: { role: payload.role ?? ROLE.ADMIN },
-          title: t('Verify to create administrator'),
-          description: t(
-            'Confirm your identity before creating an administrator account.'
-          ),
+          title:
+            (payload.role ?? 0) >= ROLE.ADMIN
+              ? t('Verify to create administrator')
+              : t('Verify to create user with upstream key'),
+          description:
+            (payload.role ?? 0) >= ROLE.ADMIN
+              ? t('Confirm your identity before creating an administrator account.')
+              : t(
+                  'Confirm your identity before creating this account with an upstream key.'
+                ),
         })
         if (!proof) return
         proofToken = proof.proof_token
@@ -269,6 +309,38 @@ export function UsersMutateDrawer({
       triggerRefresh()
     } catch (error) {
       handleServerError(error, t('Failed to load'))
+    }
+  }
+
+  const upstreamStatus = upstreamKeyQuery.data?.data
+  const upstreamConfigured = upstreamStatus?.configured === true
+
+  const handleRevealUpstreamKey = async () => {
+    if (!currentRow || isRevealingKey) return
+    setIsRevealingKey(true)
+    try {
+      const proof = await requestVerification({
+        scope: 'admin.user.upstream_key.read',
+        context: { user_id: currentRow.id },
+        title: t('Verify to view upstream key'),
+        description: t(
+          'Confirm your identity before revealing the key for {{username}}.',
+          { username: currentRow.username }
+        ),
+      })
+      if (!proof) return
+      const result = await revealUserUpstreamKey(
+        currentRow.id,
+        proof.proof_token
+      )
+      if (!result.success) {
+        throw createServerError(result, t('Failed to fetch upstream key'))
+      }
+      setRevealedKey(result.data?.key ?? '')
+    } catch (error) {
+      handleServerError(AuthOperationError.from(error))
+    } finally {
+      setIsRevealingKey(false)
     }
   }
 
@@ -408,6 +480,166 @@ export function UsersMutateDrawer({
                     </FormItem>
                   )}
                 />
+              </SideDrawerSection>
+
+              {/* Upstream Key */}
+              <SideDrawerSection>
+                <h3 className='text-sm font-medium'>{t('Upstream Key')}</h3>
+
+                {isUpdate ? (
+                  <div className='border-border/60 flex flex-col gap-2 rounded-lg border p-3'>
+                    {upstreamKeyQuery.isLoading ? (
+                      <p className='text-muted-foreground text-sm'>
+                        {t('Loading...')}
+                      </p>
+                    ) : null}
+                    {upstreamKeyQuery.isError ? (
+                      <p className='text-destructive text-sm'>
+                        {getServerErrorMessage(
+                          upstreamKeyQuery.error,
+                          t('Failed to load upstream key')
+                        )}
+                      </p>
+                    ) : null}
+                    {!upstreamKeyQuery.isLoading &&
+                    !upstreamKeyQuery.isError ? (
+                      <>
+                        <div className='flex flex-wrap items-start justify-between gap-2'>
+                          <div className='min-w-0 space-y-1'>
+                            <p className='text-sm font-medium'>
+                              {upstreamConfigured
+                                ? t('Configured')
+                                : t('Not configured')}
+                            </p>
+                            {upstreamConfigured ? (
+                              <code className='text-muted-foreground text-xs break-all'>
+                                {upstreamStatus?.key_preview}
+                              </code>
+                            ) : null}
+                            {upstreamConfigured && upstreamStatus?.updated_time ? (
+                              <p className='text-muted-foreground text-xs'>
+                                {t('Last updated')}:{' '}
+                                {formatTimestampToDate(upstreamStatus.updated_time)}
+                              </p>
+                            ) : null}
+                          </div>
+                          {upstreamConfigured ? (
+                            <Button
+                              type='button'
+                              variant='ghost'
+                              size='icon-sm'
+                              aria-label={
+                                revealedKey === null
+                                  ? t('Reveal key')
+                                  : t('Hide key')
+                              }
+                              disabled={isRevealingKey}
+                              onClick={() => {
+                                if (revealedKey !== null) {
+                                  setRevealedKey(null)
+                                  return
+                                }
+                                void handleRevealUpstreamKey()
+                              }}
+                            >
+                              {revealedKey === null ? (
+                                <Eye className='size-4' />
+                              ) : (
+                                <EyeOff className='size-4' />
+                              )}
+                            </Button>
+                          ) : null}
+                        </div>
+                        {revealedKey !== null ? (
+                          <div className='bg-muted/40 flex flex-col gap-2 rounded-md p-2'>
+                            <code className='text-xs break-all'>
+                              {revealedKey}
+                            </code>
+                            <div className='flex items-center gap-1'>
+                              <CopyButton value={revealedKey} />
+                              <Button
+                                type='button'
+                                variant='ghost'
+                                size='sm'
+                                onClick={() => setRevealedKey(null)}
+                              >
+                                <EyeOff className='mr-1 size-4' />
+                                {t('Hide key')}
+                              </Button>
+                            </div>
+                          </div>
+                        ) : null}
+                      </>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                <FormField
+                  control={form.control}
+                  name='upstream_key'
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>{t('Upstream Key')}</FormLabel>
+                      <FormControl>
+                        <Textarea
+                          {...field}
+                          rows={3}
+                          maxLength={8192}
+                          autoComplete='off'
+                          spellCheck={false}
+                          placeholder={t('Paste your upstream API key')}
+                          onChange={(event) => {
+                            field.onChange(event)
+                            if (event.target.value.trim()) {
+                              form.setValue('remove_upstream_key', false)
+                            }
+                          }}
+                        />
+                      </FormControl>
+                      <FormDescription>
+                        {isUpdate
+                          ? t('Leave blank to keep the current upstream key.')
+                          : t(
+                              'Optional. The key is used by every channel that enables per-user keys.'
+                            )}
+                      </FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                {isUpdate && upstreamConfigured ? (
+                  <FormField
+                    control={form.control}
+                    name='remove_upstream_key'
+                    render={({ field }) => (
+                      <FormItem className='border-border/60 flex flex-row items-start justify-between gap-3 rounded-lg border p-3'>
+                        <div className='space-y-1'>
+                          <FormLabel>
+                            {t('Remove the current upstream key')}
+                          </FormLabel>
+                          <FormDescription>
+                            {t(
+                              'The account will no longer be able to use channels that require per-user keys.'
+                            )}
+                          </FormDescription>
+                        </div>
+                        <FormControl>
+                          <Switch
+                            checked={field.value === true}
+                            aria-label={t('Remove the current upstream key')}
+                            onCheckedChange={(checked) => {
+                              field.onChange(checked)
+                              if (checked) {
+                                form.setValue('upstream_key', '')
+                              }
+                            }}
+                          />
+                        </FormControl>
+                      </FormItem>
+                    )}
+                  />
+                ) : null}
               </SideDrawerSection>
 
               {/* Group & Quota Settings (Update only) */}

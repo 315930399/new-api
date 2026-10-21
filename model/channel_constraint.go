@@ -8,15 +8,27 @@ import (
 )
 
 var filterEvalOrder = []dto.ChannelFilterKind{
+	dto.FilterUserUpstreamKey,
 	dto.FilterRequestPath,
 	dto.FilterTaskPluginIdentity,
 	dto.FilterResponsesWebSocket,
 }
 
 // ChannelSatisfiesFilters reports whether ch passes every filter.
-// On false, it returns the kind of the first violated filter (request_path
-// then task_plugin_identity) for error attribution.
+// On false, it returns the kind of the first violated filter (user_upstream_key,
+// request_path, then task_plugin_identity) for error attribution.
 func ChannelSatisfiesFilters(ch *Channel, modelName string, filters []dto.ChannelFilter) (bool, dto.ChannelFilterKind) {
+	userHasKey := false
+	if filter, ok := userUpstreamKeyFilter(filters); ok {
+		userHasKey = UserHasUpstreamKey(filter.UserId)
+	}
+	return channelSatisfiesFilters(ch, modelName, filters, userHasKey)
+}
+
+// channelSatisfiesFilters evaluates filters with a precomputed "user has an
+// upstream key" flag. Callers that filter many candidate channels resolve that
+// flag once instead of querying per channel.
+func channelSatisfiesFilters(ch *Channel, modelName string, filters []dto.ChannelFilter, userHasKey bool) (bool, dto.ChannelFilterKind) {
 	if ch == nil {
 		return false, ""
 	}
@@ -25,7 +37,7 @@ func ChannelSatisfiesFilters(ch *Channel, modelName string, filters []dto.Channe
 			if filter.Kind != kind {
 				continue
 			}
-			if !channelMatchesFilter(ch, modelName, filter) {
+			if !channelMatchesFilter(ch, modelName, filter, userHasKey) {
 				return false, kind
 			}
 		}
@@ -42,6 +54,10 @@ func filterCandidateIDs(ids []int, modelName string, filters []dto.ChannelFilter
 		return ids, ""
 	}
 	kept = ids
+	userHasKey := false
+	if filter, ok := userUpstreamKeyFilter(filters); ok {
+		userHasKey = UserHasUpstreamKey(filter.UserId)
+	}
 	for _, kind := range filterEvalOrder {
 		kindFilters := filtersByKind(filters, kind)
 		if len(kindFilters) == 0 {
@@ -50,7 +66,7 @@ func filterCandidateIDs(ids []int, modelName string, filters []dto.ChannelFilter
 		next := make([]int, 0, len(kept))
 		for _, id := range kept {
 			channel, exists := channelsIDM[id]
-			if candidatePassesKindFilters(channel, exists, modelName, kind, kindFilters) {
+			if candidatePassesKindFilters(channel, exists, modelName, kind, kindFilters, userHasKey) {
 				next = append(next, id)
 			}
 		}
@@ -72,7 +88,7 @@ func filtersByKind(filters []dto.ChannelFilter, kind dto.ChannelFilterKind) []dt
 	return matched
 }
 
-func candidatePassesKindFilters(ch *Channel, exists bool, modelName string, kind dto.ChannelFilterKind, filters []dto.ChannelFilter) bool {
+func candidatePassesKindFilters(ch *Channel, exists bool, modelName string, kind dto.ChannelFilterKind, filters []dto.ChannelFilter, userHasKey bool) bool {
 	if kind == dto.FilterRequestPath && !exists {
 		return true
 	}
@@ -80,15 +96,22 @@ func candidatePassesKindFilters(ch *Channel, exists bool, modelName string, kind
 		return false
 	}
 	for _, filter := range filters {
-		if !channelMatchesFilter(ch, modelName, filter) {
+		if !channelMatchesFilter(ch, modelName, filter, userHasKey) {
 			return false
 		}
 	}
 	return true
 }
 
-func channelMatchesFilter(ch *Channel, modelName string, filter dto.ChannelFilter) bool {
+func channelMatchesFilter(ch *Channel, modelName string, filter dto.ChannelFilter, userHasKey bool) bool {
 	switch filter.Kind {
+	case dto.FilterUserUpstreamKey:
+		// A channel in per-user key mode only serves users that configured the
+		// single upstream key. The key is user-scoped, so presence is enough.
+		if !ch.RequiresUserUpstreamKey() {
+			return true
+		}
+		return userHasKey
 	case dto.FilterRequestPath:
 		if filter.RequestPath == "" {
 			return true

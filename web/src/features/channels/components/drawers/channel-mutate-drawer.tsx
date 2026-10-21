@@ -301,6 +301,7 @@ const SENSITIVE_FORM_FIELDS = [
   'http2_connection_shards',
   'pass_through_body_enabled',
   'responses_websocket_enabled',
+  'user_key_mode',
   'system_prompt',
   'system_prompt_override',
   'allow_service_tier',
@@ -580,6 +581,7 @@ export function ChannelMutateDrawer({
   const keyMode = formValues.key_mode
   const currentGroups = formValues.group
   const currentType = formValues.type
+  const isTaskPluginChannel = currentType === CHANNEL_TYPE_TASK_PLUGIN
   const baseUrlPlaceholder = [CHANNEL_TYPE_VLLM, CHANNEL_TYPE_SGLANG].includes(
     currentType
   )
@@ -4418,6 +4420,59 @@ export function ChannelMutateDrawer({
                     </FormItem>
                   )
                 }}
+              />
+
+              <FormField
+                control={form.control}
+                name='user_key_mode'
+                render={({ field }) => (
+                  <FormItem className='border-border/60 flex flex-col gap-2 rounded-lg border border-dashed p-3'>
+                    <div className='flex items-start justify-between gap-3'>
+                      <div className='space-y-1'>
+                        <FormLabel>{t('Per-user keys')}</FormLabel>
+                        <FormDescription>
+                          {t(
+                            'Requests to this channel use the upstream key configured for each user. Users without a key cannot use this channel, and the API Key above is only used for channel operations.'
+                          )}
+                        </FormDescription>
+                      </div>
+                      <FormControl>
+                        <Switch
+                          checked={field.value === true}
+                          onCheckedChange={field.onChange}
+                          onBlur={field.onBlur}
+                          name={field.name}
+                          ref={field.ref}
+                          disabled={
+                            sensitiveLocked ||
+                            isMultiKeyChannel ||
+                            isTaskPluginChannel
+                          }
+                        />
+                      </FormControl>
+                    </div>
+                    {isMultiKeyChannel && (
+                      <p className='text-warning text-xs'>
+                        {t('Multi-key channels cannot switch to per-user keys.')}
+                      </p>
+                    )}
+                    {isTaskPluginChannel && (
+                      <p className='text-warning text-xs'>
+                        {t(
+                          'Task plugin channels cannot switch to per-user keys.'
+                        )}
+                      </p>
+                    )}
+                    {isEditing && field.value === true && (
+                      <p className='text-muted-foreground text-xs'>
+                        {t(
+                          "Administrators configure each user's upstream key in user management."
+                        )}
+                      </p>
+                    )}
+                    <FormMessage />
+                  </FormItem>
+                )}
               />
 
               {currentType === 57 && (

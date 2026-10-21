@@ -936,7 +936,7 @@ func TestUpdateVideoSingleTaskPollClassification(t *testing.T) {
 			require.NoError(t, model.DB.Create(task).Error)
 
 			adaptor := &scriptedPollingAdaptor{statusCode: testCase.statusCode, fetchErr: testCase.fetchErr, parse: testCase.parse, parseErr: testCase.parseErr}
-			require.NoError(t, updateVideoSingleTask(context.Background(), adaptor, ch, task.GetUpstreamTaskID(), map[string]*model.Task{
+			require.NoError(t, updateVideoSingleTask(context.Background(), adaptor, ch, nil, task.GetUpstreamTaskID(), map[string]*model.Task{
 				task.GetUpstreamTaskID(): task,
 			}))
 

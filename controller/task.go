@@ -223,9 +223,9 @@ func initTaskArtifactAdaptor(task *model.Task) (relaychannel.TaskAdaptor, error)
 	if adaptor == nil {
 		return nil, errTaskArtifactPluginUnavailable
 	}
-	pluginKey := task.PrivateData.Key
-	if pluginKey == "" {
-		pluginKey = channelModel.Key
+	pluginKey, ok := model.ResolveTaskChannelKey(channelModel, task)
+	if !ok {
+		return nil, fmt.Errorf("%w: no per-user key is configured for the task owner", errTaskArtifactPluginUnavailable)
 	}
 	baseURL := channelModel.GetBaseURL()
 	if baseURL == "" {

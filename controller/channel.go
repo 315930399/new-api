@@ -577,6 +577,14 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 	}
 
 	setting := channel.GetSetting()
+	if setting.UserKeyMode {
+		if channel.ChannelInfo.IsMultiKey {
+			return fmt.Errorf("user key mode does not support multi-key channels")
+		}
+		if channel.Type == constant.ChannelTypeTaskPlugin {
+			return fmt.Errorf("user key mode is not supported on task plugin channels")
+		}
+	}
 	if channel.Type != constant.ChannelTypeNewAPI && len(setting.TaskExtendPluginKeys) > 0 {
 		return fmt.Errorf("task_extend_plugin_keys is only supported on New API channels")
 	}
@@ -828,6 +836,14 @@ func AddChannel(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": "不支持的添加模式",
+		})
+		return
+	}
+
+	if addChannelRequest.Channel.ChannelInfo.IsMultiKey && addChannelRequest.Channel.GetSetting().UserKeyMode {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "user key mode does not support multi-key channels",
 		})
 		return
 	}
@@ -1188,6 +1204,14 @@ func UpdateChannel(c *gin.Context) {
 
 	// Always copy the original ChannelInfo so that fields like IsMultiKey and MultiKeySize are retained.
 	channel.ChannelInfo = originChannel.ChannelInfo
+
+	if channel.GetSetting().UserKeyMode && channel.ChannelInfo.IsMultiKey {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "user key mode does not support multi-key channels",
+		})
+		return
+	}
 
 	if channelHasSensitiveChanges(&channel, originChannel, requestData) &&
 		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSensitiveWrite) {
