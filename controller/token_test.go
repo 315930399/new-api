@@ -519,6 +519,54 @@ func TestGetTokenMasksKeyInResponse(t *testing.T) {
 	}
 }
 
+func TestGetTokenKeyByExactName(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	token := seedToken(t, db, 1, "exact-key", "exact1234key5678")
+	seedToken(t, db, 1, "exact-key-other", "other1234key5678")
+	seedToken(t, db, 2, "exact-key", "otheruser12345678")
+
+	ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/by-name/key", map[string]string{"name": "exact-key"}, 1)
+	GetTokenKeyByName(ctx)
+	response := decodeAPIResponse(t, recorder)
+	require.True(t, response.Success, response.Message)
+	var body struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+		Key  string `json:"key"`
+	}
+	require.NoError(t, common.Unmarshal(response.Data, &body))
+	assert.Equal(t, token.Id, body.ID)
+	assert.Equal(t, "exact-key", body.Name)
+	assert.Equal(t, token.GetFullKey(), body.Key)
+	assert.NotContains(t, recorder.Body.String(), "otheruser12345678")
+
+	// The lookup is exact and case-sensitive even when the database collation
+	// treats names case-insensitively.
+	seedToken(t, db, 1, "CaseSensitive", "case1234key5678")
+	ctx, recorder = newAuthenticatedContext(t, http.MethodPost, "/api/token/by-name/key", map[string]string{"name": "casesensitive"}, 1)
+	GetTokenKeyByName(ctx)
+	response = decodeAPIResponse(t, recorder)
+	assert.False(t, response.Success)
+	assert.Equal(t, "API key not found", response.Message)
+
+	// Duplicate exact names are ambiguous; the endpoint must not pick one.
+	seedToken(t, db, 1, "duplicate-key", "dup1234key5678")
+	seedToken(t, db, 1, "duplicate-key", "dup5678key1234")
+	ctx, recorder = newAuthenticatedContext(t, http.MethodPost, "/api/token/by-name/key", map[string]string{"name": "duplicate-key"}, 1)
+	GetTokenKeyByName(ctx)
+	response = decodeAPIResponse(t, recorder)
+	assert.False(t, response.Success)
+	assert.Equal(t, "Multiple API keys use this name; query by ID instead", response.Message)
+	assert.NotContains(t, recorder.Body.String(), "dup1234key5678")
+	assert.NotContains(t, recorder.Body.String(), "dup5678key1234")
+
+	ctx, recorder = newAuthenticatedContext(t, http.MethodPost, "/api/token/by-name/key", map[string]string{"name": "   "}, 1)
+	GetTokenKeyByName(ctx)
+	response = decodeAPIResponse(t, recorder)
+	assert.False(t, response.Success)
+	assert.Equal(t, "Token name is required", response.Message)
+}
+
 func TestUpdateTokenMasksKeyInResponse(t *testing.T) {
 	db := setupTokenControllerTestDB(t)
 	token := seedToken(t, db, 1, "editable-token", "yzab1234cdef5678")
