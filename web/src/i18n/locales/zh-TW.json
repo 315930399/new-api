@@ -7336,6 +7336,9 @@
     "Zhipu": "智譜",
     "Zhipu GLM": "智譜GLM",
     "Zhipu V4": "智譜 V4",
-    "Zoom": "縮放"
+    "Zoom": "縮放",
+    "Token name is required": "請輸入權杖名稱",
+    "API key not found": "找不到 API Key",
+    "Multiple API keys use this name; query by ID instead": "有多個 API Key 使用此名稱，請改用 ID 查詢"
   }
 }

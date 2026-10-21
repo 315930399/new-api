@@ -269,6 +269,41 @@ func GetTokenByIds(id int, userId int) (*Token, error) {
 	return &token, err
 }
 
+// ErrTokenNameAmbiguous reports that more than one token owned by the user
+// carries the exact requested name.
+var ErrTokenNameAmbiguous = errors.New("multiple API keys use this name")
+
+// GetTokenByExactName returns the single token owned by userId whose name
+// matches exactly. The database comparison is backed by an in-memory equality
+// check so a case-insensitive database collation cannot turn an exact lookup
+// into a different name. Duplicate exact names are rejected as ambiguous.
+func GetTokenByExactName(userId int, name string) (*Token, error) {
+	if userId <= 0 {
+		return nil, errors.New("invalid user id")
+	}
+	if name == "" {
+		return nil, errors.New("token name is empty")
+	}
+	var candidates []*Token
+	if err := DB.Where("user_id = ? AND name = ?", userId, name).Find(&candidates).Error; err != nil {
+		return nil, err
+	}
+	matches := make([]*Token, 0, len(candidates))
+	for _, token := range candidates {
+		if token.Name == name {
+			matches = append(matches, token)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return nil, gorm.ErrRecordNotFound
+	case 1:
+		return matches[0], nil
+	default:
+		return nil, ErrTokenNameAmbiguous
+	}
+}
+
 func GetTokenById(id int) (*Token, error) {
 	if id == 0 {
 		return nil, errors.New("token id is empty")

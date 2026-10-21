@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/shopspring/decimal"
+	"gorm.io/gorm"
 )
 
 type tokenAutoGroupsInput struct {
@@ -204,6 +206,46 @@ func GetTokenKey(c *gin.Context) {
 	common.SetContextKey(c, constant.ContextKeyTokenAuditSucceeded, true)
 	common.ApiSuccess(c, gin.H{
 		"key": token.GetFullKey(),
+	})
+}
+
+type tokenKeyByNameRequest struct {
+	Name string `json:"name"`
+}
+
+// GetTokenKeyByName returns a user's full API key after an exact name match.
+// Token names are not unique, so the request is rejected when more than one
+// token owned by the user carries exactly this name.
+func GetTokenKeyByName(c *gin.Context) {
+	request := tokenKeyByNameRequest{}
+	if err := common.DecodeJson(c.Request.Body, &request); err != nil {
+		common.ApiErrorT(c, "Invalid parameters")
+		return
+	}
+	name := strings.TrimSpace(request.Name)
+	if name == "" {
+		common.ApiErrorT(c, "Token name is required")
+		return
+	}
+	token, err := model.GetTokenByExactName(c.GetInt("id"), name)
+	if err != nil {
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			common.ApiErrorT(c, "API key not found")
+		case errors.Is(err, model.ErrTokenNameAmbiguous):
+			common.ApiErrorT(c, "Multiple API keys use this name; query by ID instead")
+		default:
+			common.ApiError(c, err)
+		}
+		return
+	}
+	params := tokenAuditParams(c)
+	params["id"], params["name"] = token.Id, token.Name
+	common.SetContextKey(c, constant.ContextKeyTokenAuditSucceeded, true)
+	common.ApiSuccess(c, gin.H{
+		"id":   token.Id,
+		"name": token.Name,
+		"key":  token.GetFullKey(),
 	})
 }
 
